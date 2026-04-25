@@ -19,6 +19,10 @@
             "@gltf-transform/functions": "https://esm.sh/@gltf-transform/functions@4",
             "meshoptimizer": "https://esm.sh/meshoptimizer@0.21.0",
             "three/examples/jsm/loaders/KTX2Loader.js": "https://unpkg.com/three@0.170.0/examples/jsm/loaders/KTX2Loader.js",
+            "three/examples/jsm/loaders/OBJLoader.js": "https://unpkg.com/three@0.170.0/examples/jsm/loaders/OBJLoader.js",
+            "three/examples/jsm/loaders/MTLLoader.js": "https://unpkg.com/three@0.170.0/examples/jsm/loaders/MTLLoader.js",
+            "three/examples/jsm/loaders/FBXLoader.js": "https://unpkg.com/three@0.170.0/examples/jsm/loaders/FBXLoader.js",
+            "three/examples/jsm/exporters/GLTFExporter.js": "https://unpkg.com/three@0.170.0/examples/jsm/exporters/GLTFExporter.js",
             "ktx2-encoder": "./browser/ktx2-encoder.js?v=20260207c",
             "ktx-parse": "https://unpkg.com/ktx-parse@0.7.1/dist/ktx-parse.esm.js"
         }
@@ -115,6 +119,25 @@
 
     .file-select-button:hover {
       background: rgba(59, 130, 246, 1);
+    }
+
+    .import-options {
+      margin-top: 18px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: #94a3b8;
+      font-size: 13px;
+      pointer-events: auto;
+    }
+
+    .import-options select {
+      background: rgba(15, 23, 42, 0.85);
+      color: #e2e8f0;
+      border: 1px solid #475569;
+      border-radius: 6px;
+      padding: 6px 8px;
+      font: inherit;
     }
 
     #fileInput {
@@ -684,17 +707,25 @@
   <!-- Drag and drop overlay (hidden by default) -->
   <div class="drag-drop-overlay" id="dragOverlay">
     <div class="panel">
-      <div class="dd-title">Drop .glb or .gltf files to load</div>
-      <div class="dd-sub">For GLTF, include textures and .bin files</div>
+      <div class="dd-title">Drop .glb, .gltf, .obj or .fbx files to load</div>
+      <div class="dd-sub">For GLTF/OBJ/FBX, include textures, .bin and .mtl files</div>
     </div>
   </div>
 
   <!-- Empty state when no model loaded -->
   <div class="empty-state" id="emptyState">
     <h2>Below Optimiser</h2>
-    <p>Drag & drop a .glb or .gltf file</p>
+    <p>Drag & drop a .glb, .gltf, .obj or .fbx file</p>
+    <label class="import-options" for="sourceUpSelect">
+      OBJ/FBX source up
+      <select id="sourceUpSelect">
+        <option value="y" selected>Y-up</option>
+        <option value="z">Z-up</option>
+      </select>
+    </label>
+    <br>
     <label class="file-select-button" id="chooseFilesBtn" for="fileInput" role="button" tabindex="0">Choose files</label>
-    <input type="file" id="fileInput" accept=".glb,.gltf,.bin,.png,.jpg,.jpeg,.webp" multiple />
+    <input type="file" id="fileInput" accept=".glb,.gltf,.obj,.fbx,.mtl,.bin,.png,.jpg,.jpeg,.webp" multiple />
   </div>
 
   <!-- Survey/Dive toggle -->
@@ -817,6 +848,10 @@
     import { WebIO } from '@gltf-transform/core';
     import * as THREE from 'three';
     import { KTX2Loader } from 'three/examples/jsm/loaders/KTX2Loader.js';
+    import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
+    import { MTLLoader } from 'three/examples/jsm/loaders/MTLLoader.js';
+    import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
+    import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
     import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
     import {
       dedup, weld, join, simplify, textureCompress,
@@ -846,6 +881,10 @@
     let isOrientationEditMode = false;
     let previewLoadWarning = '';
     let previewLoadWarningIsError = false;
+    let pendingImportWarnings = [];
+    let pendingObjMaterialImport = null;
+    let pendingFbxTextureImport = null;
+    let lastRemovedImportTextures = [];
     let requiresReoptimisation = false;
     let textureResizeState = {
       checked: false,
@@ -886,6 +925,7 @@
     const uploadTexturesBtn = document.getElementById('uploadTexturesBtn');
     const textureInput = document.getElementById('textureInput');
     const chooseFilesBtn = document.getElementById('chooseFilesBtn');
+    const sourceUpSelect = document.getElementById('sourceUpSelect');
     const progressText = document.getElementById('progressText');
     const statusMessageText = document.getElementById('statusMessageText');
     const viewToggle = document.getElementById('viewToggle');
@@ -2255,10 +2295,9 @@
     }
 
     function setOrientationView(view) {
-      if (!isOrientationEditMode) return;
       const camera = viewer?.belowViewer?.cameraManager?.getCamera?.();
       const controls = viewer?.belowViewer?.cameraManager?.getControls?.();
-      if (!camera) return;
+      if (!camera || !hasModel) return;
 
       const frame = getOrientationFrame();
       const distance = Math.max(2, frame.radius * 2.4);
@@ -2268,12 +2307,23 @@
       if (view === 'front') {
         pos.addScaledVector(MODEL_CONVENTION_FRONT, distance);
         camera.up.copy(MODEL_CONVENTION_UP);
+      } else if (view === 'back') {
+        pos.addScaledVector(MODEL_CONVENTION_FRONT, -distance);
+        camera.up.copy(MODEL_CONVENTION_UP);
       } else if (view === 'right') {
         pos.addScaledVector(MODEL_CONVENTION_RIGHT, distance);
+        camera.up.copy(MODEL_CONVENTION_UP);
+      } else if (view === 'left') {
+        pos.addScaledVector(MODEL_CONVENTION_RIGHT, -distance);
         camera.up.copy(MODEL_CONVENTION_UP);
       } else if (view === 'top') {
         pos.addScaledVector(MODEL_CONVENTION_UP, distance);
         camera.up.set(0, 0, -1);
+      } else if (view === 'bottom') {
+        pos.addScaledVector(MODEL_CONVENTION_UP, -distance);
+        camera.up.set(0, 0, 1);
+      } else {
+        return;
       }
 
       camera.position.copy(pos);
@@ -2804,10 +2854,336 @@
       return file && file.type && file.type.startsWith('image/');
     }
 
+    function isMaterialFile(file) {
+      return file && file.name && file.name.toLowerCase().endsWith('.mtl');
+    }
+
     function isModelFile(file) {
       if (!file || !file.name) return false;
       const name = file.name.toLowerCase();
-      return name.endsWith('.glb') || name.endsWith('.gltf');
+      return name.endsWith('.glb') || name.endsWith('.gltf') || name.endsWith('.obj') || name.endsWith('.fbx');
+    }
+
+    function getFileExtension(file) {
+      const name = typeof file === 'string' ? file : file?.name;
+      const match = String(name || '').toLowerCase().match(/\.([^.]+)$/);
+      return match ? match[1] : '';
+    }
+
+    function stripFileExtension(name) {
+      return String(name || '').replace(/\.[^.]+$/, '');
+    }
+
+    function getFileBaseName(name) {
+      return String(name || '').split(/[\\/]/).pop();
+    }
+
+    function isLikelyExternalAssetUrl(url) {
+      if (!url) return false;
+      if (/^(data|blob):/i.test(url)) return false;
+      return /\.(png|jpe?g|webp|bmp|gif|tga|tiff?|ktx2|dds)([?#].*)?$/i.test(url);
+    }
+
+    function getSelectedSourceUp() {
+      return sourceUpSelect?.value === 'z' ? 'z' : 'y';
+    }
+
+    function applySourceUpConversion(object, sourceUp) {
+      if (sourceUp !== 'z') return;
+      object.rotation.x = -Math.PI / 2;
+      object.updateMatrixWorld(true);
+    }
+
+    function createImportLoadingManager(fileList) {
+      const objectUrls = [];
+      const urlMap = new Map();
+      const missingResources = new Set();
+
+      for (const file of fileList) {
+        if (!file?.name) continue;
+        const url = URL.createObjectURL(file);
+        objectUrls.push(url);
+        const fullName = file.name.toLowerCase();
+        const baseName = getFileBaseName(file.name).toLowerCase();
+        urlMap.set(fullName, url);
+        urlMap.set(baseName, url);
+      }
+
+      const manager = new THREE.LoadingManager();
+      manager.setURLModifier((url) => {
+        const cleanUrl = String(url || '').split(/[?#]/)[0];
+        const decodedUrl = decodeURIComponent(cleanUrl);
+        const normalized = decodedUrl.replace(/^\.\//, '').toLowerCase();
+        const baseName = getFileBaseName(decodedUrl).toLowerCase();
+        const resolved = urlMap.get(normalized) || urlMap.get(baseName);
+        if (resolved) return resolved;
+        if (isLikelyExternalAssetUrl(decodedUrl)) {
+          missingResources.add(baseName || normalized);
+        }
+        return url;
+      });
+
+      return {
+        manager,
+        missingResources,
+        revoke() {
+          objectUrls.forEach((url) => URL.revokeObjectURL(url));
+        }
+      };
+    }
+
+    function findAssociatedMtlFile(mainFile, fileList) {
+      const mtlFiles = fileList.filter((file) => getFileExtension(file) === 'mtl');
+      if (mtlFiles.length <= 1) return mtlFiles[0] || null;
+      const mainBaseName = stripFileExtension(getFileBaseName(mainFile.name)).toLowerCase();
+      return mtlFiles.find((file) => stripFileExtension(getFileBaseName(file.name)).toLowerCase() === mainBaseName) || mtlFiles[0];
+    }
+
+    function mergePendingObjMaterialFiles(files) {
+      if (!pendingObjMaterialImport?.mainFile) return [];
+
+      const merged = new Map();
+      const addFile = (file) => {
+        if (!file?.name) return;
+        merged.set(getFileBaseName(file.name).toLowerCase(), file);
+      };
+
+      (pendingObjMaterialImport.files || []).forEach(addFile);
+      addFile(pendingObjMaterialImport.mainFile);
+      Array.from(files instanceof FileList ? files : files || []).forEach(addFile);
+      return Array.from(merged.values());
+    }
+
+    function mergePendingFbxTextureFiles(files) {
+      if (!pendingFbxTextureImport?.mainFile) return [];
+
+      const merged = new Map();
+      const addFile = (file) => {
+        if (!file?.name) return;
+        merged.set(getFileBaseName(file.name).toLowerCase(), file);
+      };
+
+      (pendingFbxTextureImport.files || []).forEach(addFile);
+      addFile(pendingFbxTextureImport.mainFile);
+      Array.from(files instanceof FileList ? files : files || []).forEach(addFile);
+      return Array.from(merged.values());
+    }
+
+    async function waitForImportedTextures(object) {
+      const images = new Set();
+
+      object.traverse((node) => {
+        const materials = Array.isArray(node.material) ? node.material : [node.material];
+        materials.forEach((material) => {
+          if (!material) return;
+          for (const key in material) {
+            const value = material[key];
+            if (value?.isTexture && value.image) {
+              images.add(value.image);
+            }
+          }
+        });
+      });
+
+      const waits = Array.from(images).map((image) => {
+        if (!image || typeof HTMLImageElement === 'undefined' || !(image instanceof HTMLImageElement)) {
+          return Promise.resolve();
+        }
+
+        if (image.complete && image.naturalWidth > 0) {
+          return Promise.resolve();
+        }
+
+        return new Promise((resolve) => {
+          let settled = false;
+          const done = () => {
+            if (settled) return;
+            settled = true;
+            image.removeEventListener('load', done);
+            image.removeEventListener('error', done);
+            resolve();
+          };
+
+          image.addEventListener('load', done, { once: true });
+          image.addEventListener('error', done, { once: true });
+          setTimeout(done, 15000);
+        });
+      });
+
+      await Promise.all(waits);
+    }
+
+    function getTextureImageLabel(texture, fallback = 'texture') {
+      const image = texture?.image;
+      const source = image?.currentSrc || image?.src || texture?.source?.data?.currentSrc || texture?.source?.data?.src || texture?.name || fallback;
+      return getFileBaseName(source) || fallback;
+    }
+
+    function isBrokenImportedTexture(texture) {
+      const image = texture?.image || texture?.source?.data;
+      if (!image) return true;
+      if (typeof HTMLImageElement !== 'undefined' && image instanceof HTMLImageElement) {
+        return image.naturalWidth === 0 || image.naturalHeight === 0;
+      }
+      if (typeof ImageBitmap !== 'undefined' && image instanceof ImageBitmap) {
+        return image.width === 0 || image.height === 0;
+      }
+      if ('width' in image && 'height' in image) {
+        return !image.width || !image.height;
+      }
+      return false;
+    }
+
+    function removeBrokenImportedTextures(object) {
+      const removed = new Set();
+
+      object.traverse((node) => {
+        const materials = Array.isArray(node.material) ? node.material : [node.material];
+        materials.forEach((material) => {
+          if (!material) return;
+          for (const key in material) {
+            const value = material[key];
+            if (!value?.isTexture || !isBrokenImportedTexture(value)) continue;
+            removed.add(getTextureImageLabel(value, key));
+            value.dispose?.();
+            material[key] = null;
+            material.needsUpdate = true;
+          }
+        });
+      });
+
+      return Array.from(removed);
+    }
+
+    function convertMaterialForGltf(material) {
+      if (!material || material.isMeshStandardMaterial || material.isMeshBasicMaterial) return material;
+      const hasBaseTexture = !!material.map;
+
+      const standard = new THREE.MeshStandardMaterial({
+        name: material.name || '',
+        color: hasBaseTexture ? new THREE.Color(0xffffff) : (material.color ? material.color.clone() : new THREE.Color(0xffffff)),
+        map: material.map || null,
+        normalMap: material.normalMap || null,
+        aoMap: material.aoMap || null,
+        emissive: material.emissive ? material.emissive.clone() : new THREE.Color(0x000000),
+        emissiveMap: material.emissiveMap || null,
+        opacity: material.opacity,
+        transparent: material.transparent,
+        alphaTest: material.alphaTest || 0,
+        side: material.side,
+        roughness: Number.isFinite(material.shininess) ? Math.max(0.2, 1 - Math.min(material.shininess, 100) / 100) : 0.85,
+        metalness: 0
+      });
+      standard.vertexColors = hasBaseTexture ? false : !!material.vertexColors;
+
+      if (standard.map) {
+        standard.map.colorSpace = THREE.SRGBColorSpace;
+        standard.map.needsUpdate = true;
+      }
+      if (standard.emissiveMap) {
+        standard.emissiveMap.colorSpace = THREE.SRGBColorSpace;
+        standard.emissiveMap.needsUpdate = true;
+      }
+
+      standard.needsUpdate = true;
+      return standard;
+    }
+
+    function normalizeImportedMaterialsForGltf(object) {
+      object.traverse((node) => {
+        if (!node.isMesh || !node.material) return;
+        node.material = Array.isArray(node.material)
+          ? node.material.map(convertMaterialForGltf)
+          : convertMaterialForGltf(node.material);
+
+        const materials = Array.isArray(node.material) ? node.material : [node.material];
+        const hasBaseTexture = materials.some((material) => !!material?.map);
+        if (hasBaseTexture && node.geometry?.getAttribute?.('color')) {
+          node.geometry.deleteAttribute('color');
+        }
+      });
+    }
+
+    async function exportObject3DToGlb(object, sourceName, animations = []) {
+      setProgress(`Converting ${getFileExtension(sourceName).toUpperCase()} to GLB...`);
+      await new Promise(requestAnimationFrame);
+
+      object.name = object.name || stripFileExtension(getFileBaseName(sourceName)) || 'Imported model';
+      object.updateMatrixWorld(true);
+      await waitForImportedTextures(object);
+      lastRemovedImportTextures = removeBrokenImportedTextures(object);
+
+      const exporter = new GLTFExporter();
+      const result = await exporter.parseAsync(object, {
+        binary: true,
+        animations,
+        onlyVisible: false,
+        truncateDrawRange: true
+      });
+
+      if (result instanceof ArrayBuffer) return result;
+      if (result?.buffer instanceof ArrayBuffer) return result.buffer;
+      return new TextEncoder().encode(JSON.stringify(result)).buffer;
+    }
+
+    async function convertObjToGlb(mainFile, fileList) {
+      const importContext = createImportLoadingManager(fileList);
+
+      try {
+        const objLoader = new OBJLoader(importContext.manager);
+        const mtlFile = findAssociatedMtlFile(mainFile, fileList);
+
+        if (mtlFile) {
+          setProgress('Reading MTL materials...');
+          const mtlText = await mtlFile.text();
+          const materials = new MTLLoader(importContext.manager).parse(mtlText, '');
+          materials.preload();
+          objLoader.setMaterials(materials);
+          pendingObjMaterialImport = null;
+        } else {
+          pendingObjMaterialImport = { mainFile, files: [...fileList] };
+          pendingImportWarnings.push('OBJ loaded without an .mtl file, so materials and texture references were not imported. Drop the .mtl and any texture image files onto this page to reload it with materials.');
+        }
+
+        setProgress('Reading OBJ...');
+        const objText = await mainFile.text();
+        const object = objLoader.parse(objText);
+        applySourceUpConversion(object, getSelectedSourceUp());
+        normalizeImportedMaterialsForGltf(object);
+        return await exportObject3DToGlb(object, mainFile.name);
+      } finally {
+        importContext.revoke();
+      }
+    }
+
+    async function convertFbxToGlb(mainFile, fileList) {
+      const importContext = createImportLoadingManager(fileList);
+
+      try {
+        setProgress('Reading FBX...');
+        const arrayBuffer = await mainFile.arrayBuffer();
+        const object = new FBXLoader(importContext.manager).parse(arrayBuffer, '');
+        applySourceUpConversion(object, getSelectedSourceUp());
+        normalizeImportedMaterialsForGltf(object);
+        const glb = await exportObject3DToGlb(object, mainFile.name, object.animations || []);
+        const missingTextures = Array.from(new Set([
+          ...Array.from(importContext.missingResources || []),
+          ...lastRemovedImportTextures
+        ]));
+
+        if (missingTextures.length > 0) {
+          pendingFbxTextureImport = { mainFile, files: [...fileList], missingTextures };
+          pendingImportWarnings.push(
+            `FBX references ${missingTextures.length} missing texture file(s): ${missingTextures.join(', ')}. Drop those texture files onto this page to reload it with textures.`
+          );
+        } else {
+          pendingFbxTextureImport = null;
+        }
+
+        return glb;
+      } finally {
+        importContext.revoke();
+      }
     }
 
     function normalizeName(value) {
@@ -3802,7 +4178,7 @@
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      const baseName = originalFileName.replace(/\.(glb|gltf)$/i, '');
+      const baseName = originalFileName.replace(/\.(glb|gltf|obj|fbx)$/i, '');
       a.download = hasOptimized ? `${baseName}-optimised.glb` : `${baseName}-edited.glb`;
       a.click();
       URL.revokeObjectURL(url);
@@ -3825,6 +4201,33 @@
     viewFrontBtn.addEventListener('click', () => setOrientationView('front'));
     viewRightBtn.addEventListener('click', () => setOrientationView('right'));
     viewTopBtn.addEventListener('click', () => setOrientationView('top'));
+
+    function isEditableShortcutTarget(target) {
+      const tagName = target?.tagName?.toLowerCase?.();
+      return target?.isContentEditable || tagName === 'input' || tagName === 'textarea' || tagName === 'select';
+    }
+
+    window.addEventListener('keydown', (event) => {
+      if (event.defaultPrevented || event.altKey || event.metaKey || event.shiftKey || isEditableShortcutTarget(event.target)) return;
+      if (!hasModel || isOptimizing) return;
+
+      const opposite = event.ctrlKey;
+      const key = event.code || event.key;
+      let view = '';
+
+      if (key === 'Digit1' || key === 'Numpad1' || event.key === '1') {
+        view = opposite ? 'back' : 'front';
+      } else if (key === 'Digit3' || key === 'Numpad3' || event.key === '3') {
+        view = opposite ? 'left' : 'right';
+      } else if (key === 'Digit7' || key === 'Numpad7' || event.key === '7') {
+        view = opposite ? 'bottom' : 'top';
+      }
+
+      if (!view) return;
+      event.preventDefault();
+      setOrientationView(view);
+    });
+
     scaleFactorInput.addEventListener('input', () => {
       lastScaleControlSource = 'scale';
       syncScaleMeasurementControls('scale');
@@ -3922,6 +4325,10 @@
       requiresReoptimisation = false;
       previewLoadWarning = '';
       previewLoadWarningIsError = false;
+      pendingImportWarnings = [];
+      pendingObjMaterialImport = null;
+      pendingFbxTextureImport = null;
+      lastRemovedImportTextures = [];
       setTextureResizeState();
       lastOptimizationSummary = null;
       clearStatsDisplay();
@@ -4471,11 +4878,17 @@
       // Find the main model file
       const mainFile = fileList.find(f =>
         f.name.toLowerCase().endsWith('.glb') ||
-        f.name.toLowerCase().endsWith('.gltf')
+        f.name.toLowerCase().endsWith('.gltf') ||
+        f.name.toLowerCase().endsWith('.obj') ||
+        f.name.toLowerCase().endsWith('.fbx')
       );
 
       if (!mainFile) {
-        alert('Please select a .glb or .gltf file');
+        if (fileList.some(isMaterialFile) && pendingObjMaterialImport?.mainFile) {
+          await loadModelFile(mergePendingObjMaterialFiles(fileList));
+          return;
+        }
+        alert('Please select a .glb, .gltf, .obj or .fbx file');
         return;
       }
 
@@ -4495,10 +4908,12 @@
       try {
         let arrayBuffer;
 
-        if (mainFile.name.toLowerCase().endsWith('.glb')) {
+        const mainExtension = getFileExtension(mainFile);
+
+        if (mainExtension === 'glb') {
           // Direct GLB load - no gltf-transform needed!
           arrayBuffer = await mainFile.arrayBuffer();
-        } else {
+        } else if (mainExtension === 'gltf') {
           // GLTF with associated files - need gltf-transform to convert to GLB
           const readIO = await initReadOnlyIO();
           setProgress('Reading GLTF...');
@@ -4526,6 +4941,14 @@
           arrayBuffer = glbData.buffer;
 
           setProgress(null);
+        } else if (mainExtension === 'obj') {
+          // OBJ/MTL/textures are imported through three.js, then normalized to GLB.
+          arrayBuffer = await convertObjToGlb(mainFile, fileList);
+        } else if (mainExtension === 'fbx') {
+          // FBX is imported through three.js, then normalized to GLB.
+          arrayBuffer = await convertFbxToGlb(mainFile, fileList);
+        } else {
+          throw new Error(`Unsupported model format: .${mainExtension || 'unknown'}`);
         }
 
         // Store original for optimization
@@ -4537,6 +4960,9 @@
         loadedHint.classList.add('visible');
 
         await loadModelFromArrayBuffer(arrayBuffer, true);
+        if (pendingImportWarnings.length > 0) {
+          showStatusMessage(pendingImportWarnings.join(' '), true);
+        }
         setOptimizeProgress(1);
         setProgress(null);
       } catch (err) {
@@ -4623,6 +5049,7 @@
 
       const files = Array.from(e.dataTransfer.files);
       const modelFiles = files.filter(isModelFile);
+      const materialFiles = files.filter(isMaterialFile);
       const imageFiles = files.filter(isImageFile);
 
       if (modelFiles.length > 0) {
@@ -4630,7 +5057,20 @@
         return;
       }
 
+      if (materialFiles.length > 0) {
+        if (!pendingObjMaterialImport?.mainFile) {
+          alert('Load the matching .obj first, then drop its .mtl and texture files.');
+          return;
+        }
+        await loadModelFile(mergePendingObjMaterialFiles(files));
+        return;
+      }
+
       if (imageFiles.length > 0) {
+        if (pendingFbxTextureImport?.mainFile) {
+          await loadModelFile(mergePendingFbxTextureFiles(files));
+          return;
+        }
         if (!originalArrayBuffer) {
           alert('Load a model before dropping textures.');
           return;
