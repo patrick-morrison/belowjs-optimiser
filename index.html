@@ -888,6 +888,7 @@
   </div>
 
   <script type="module">
+    import { afterNextPaint, preparePreview } from './browser/preview-loading.js?v=20260923';
     import { encoderURLs, getBrowserEncoderBackend, MAX_SOURCE_PIXELS } from './browser/encoder-backend.js?v=basis25-20260923';
     import { ModelViewer } from 'belowjs';
     import { WebIO, ImageUtils } from '@gltf-transform/core';
@@ -916,6 +917,8 @@
     let optimizedArrayBuffer = null;
     let isShowingOptimized = false;
     let isOptimizing = false;
+    let isImporting = false;
+    let isPreparingPreview = false;
     let optimizationError = '';
     let originalFileName = 'model.glb';
     let hasNewTextures = false;
@@ -2836,7 +2839,7 @@
     }
 
     async function reloadCurrentView(options = {}) {
-      if (isOptimizing) return false;
+      if (isOptimizing || isImporting || isPreparingPreview) return false;
       if (options.onlyIfPending && !pendingPreviewReload && hasModel) return false;
       const buffer = (isShowingOptimized && optimizedArrayBuffer) ? optimizedArrayBuffer : originalArrayBuffer;
       if (!buffer) return false;
@@ -4061,7 +4064,7 @@
     }
 
     async function runOptimization() {
-      if (!originalArrayBuffer || isOptimizing) return;
+      if (!originalArrayBuffer || isOptimizing || isImporting || isPreparingPreview) return;
       if (isOrientationEditMode) {
         const orientationApplied = await applyOrientationEdits();
         if (!orientationApplied) return;
@@ -4317,19 +4320,35 @@
     });
 
     // Helper to load model from ArrayBuffer
-    async function loadModelFromArrayBuffer(arrayBuffer, updateDiskSize = true) {
+    async function loadModelFromArrayBuffer(arrayBuffer, updateDiskSize = true, { autoFrame = !hasModel } = {}) {
+      if (isPreparingPreview) return false;
       const blob = new Blob([arrayBuffer], { type: 'model/gltf-binary' });
       const url = URL.createObjectURL(blob);
+      isPreparingPreview = true;
 
       if (updateDiskSize) {
         lastBlobSize = arrayBuffer.byteLength;
       }
 
       try {
+        setProgress('Decoding model and textures...');
+        await afterNextPaint();
         if (hasModel) {
           viewer.belowViewer.clearModels();
+          await afterNextPaint();
         }
-        await viewer.belowViewer.loadModel(url, { autoFrame: !hasModel });
+        const model = await viewer.belowViewer.loadModel(url, { autoFrame });
+        if (!model) throw new Error('Preview load was cancelled.');
+        const preparation = await preparePreview({
+          model,
+          renderer: viewer.belowViewer.renderer,
+          camera: viewer.belowViewer.cameraManager.getCamera(),
+          scene: viewer.belowViewer.sceneManager.scene,
+          onStage: setProgress
+        });
+        if (new URLSearchParams(location.search).get('test') === '1') {
+          window.__belowOptimiserPreviewPreparation = preparation;
+        }
         hasModel = true;
         pendingPreviewReload = false;
         previewLoadWarning = '';
@@ -4359,6 +4378,8 @@
         console.warn('Preview load failed:', err);
         return false;
       } finally {
+        isPreparingPreview = false;
+        setProgress(null);
         URL.revokeObjectURL(url);
       }
     }
@@ -4369,6 +4390,7 @@
       window.__belowOptimiserLastError = null;
       window.__belowOptimiserLastWorkerResult = null;
       window.__belowOptimiserTestOutput = null;
+      window.__belowOptimiserPreviewPreparation = null;
       setOrientationEditMode(false);
       originalArrayBuffer = null;
       optimizedArrayBuffer = null;
@@ -4938,8 +4960,12 @@
     // Function to load model file(s) and update UI state
     // Supports: single GLB, single GLTF, or GLTF + associated files
     async function loadModelFile(files) {
+      if (isImporting || isPreparingPreview || isOptimizing) {
+        showStatusMessage('Please wait for the current operation to finish.', true);
+        return;
+      }
       // Handle FileList or single File
-      const fileList = files instanceof FileList ? Array.from(files) : [files];
+      const fileList = files instanceof FileList || Array.isArray(files) ? Array.from(files) : [files];
 
       if (fileList.length === 0) return;
 
@@ -4960,20 +4986,23 @@
         return;
       }
 
-      // Reset optimization state for new model
-      resetOptimizationState();
-      originalFileName = mainFile.name;
-
-      // Show loading overlay
+      isImporting = true;
+      chooseFilesBtn.disabled = true;
+      // Paint acknowledgement before resetting the old model or reading the file.
       resetOptimizeProgress();
       setOptimizeProgress(0);
       showOptimizeOverlay(true);
       setOptimizeOverlayMode('spinner');
       setOptimizeStatus('Loading model');
       setOptimizeWarningVisible(false);
-      setProgress('Loading model...');
+      setProgress(`Reading ${mainFile.name}...`);
 
       try {
+        await afterNextPaint();
+        resetOptimizationState();
+        originalFileName = mainFile.name;
+        setProgress(`Reading ${mainFile.name}...`);
+        await afterNextPaint();
         let arrayBuffer;
 
         const mainExtension = getFileExtension(mainFile);
@@ -4985,6 +5014,7 @@
           // GLTF with associated files - need gltf-transform to convert to GLB
           const readIO = await initReadOnlyIO();
           setProgress('Reading GLTF...');
+          await afterNextPaint();
 
           // Build resource map from associated files
           const resources = {};
@@ -5005,6 +5035,7 @@
 
           // Convert to GLB
           setProgress('Converting to GLB...');
+          await afterNextPaint();
           const glbData = await readIO.writeBinary(gltfDocument);
           arrayBuffer = glbData.buffer;
 
@@ -5027,7 +5058,7 @@
         emptyState.style.display = 'none';
         loadedHint.classList.add('visible');
 
-        await loadModelFromArrayBuffer(arrayBuffer, true);
+        await loadModelFromArrayBuffer(arrayBuffer, true, { autoFrame: true });
         if (pendingImportWarnings.length > 0) {
           showStatusMessage(pendingImportWarnings.join(' '), true);
         }
@@ -5037,6 +5068,9 @@
         console.error('Failed to load model:', err);
         alert('Failed to load the model: ' + err.message);
       } finally {
+        isImporting = false;
+        chooseFilesBtn.disabled = false;
+        setProgress(null);
         showOptimizeOverlay(false);
       }
     }
@@ -5158,6 +5192,10 @@
       dragOverlay.classList.remove('visible');
 
       if (e.dataTransfer.files.length === 0) return;
+      if (isImporting || isPreparingPreview || isOptimizing) {
+        showStatusMessage('Please wait for the current operation to finish.', true);
+        return;
+      }
 
       const files = Array.from(e.dataTransfer.files);
       const modelFiles = files.filter(isModelFile);
@@ -5203,7 +5241,7 @@
 
     // Periodically refresh stats (in case textures finish loading later)
     setInterval(() => {
-      if (!hasModel) return;
+      if (!hasModel || isImporting || isPreparingPreview || isOptimizing) return;
       const modelRoot = viewer.belowViewer.loadedModels?.[0]?.model || viewer.belowViewer.sceneManager.scene;
       const stats = collectModelStats(modelRoot);
       updateStatsDisplay(stats);

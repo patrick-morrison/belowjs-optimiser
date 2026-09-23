@@ -3,6 +3,41 @@
 Historical 1.50 release checks are below. The newer Basis 2.5 results and revised
 full-resolution default are in [the upgrade report](../docs/BASIS_BROWSER_UPGRADE.md).
 
+## Import Responsiveness (2026-09-23)
+
+The import path now paints loading feedback before reading/resetting a model,
+prepares each unique texture separately with a paint between uploads, and uses
+Three.js `compileAsync` before revealing the preview. These are the documented
+[renderer preparation APIs](https://threejs.org/docs/pages/WebGLRenderer.html).
+Source texture dimensions, pixels, and encoder settings are unchanged.
+
+Measured in desktop Chromium on the actual local models (single observations,
+not controlled cross-device benchmarks):
+
+- K XI before: longest import task 709 ms; CPU profile attributed about 645 ms
+  to `texSubImage2D`.
+- K XI after: first post-frame loading acknowledgement 6.8 ms; ready about
+  1.24 s after file selection; 8192x8192 upload 484 ms, plus a 120 ms decode/
+  processing task. The texture and wreck appearance were visually checked.
+- Awhina drop after: acknowledgement 12.8 ms; ready about 1.08 s; three
+  4096x4096 uploads in separate tasks of 144, 133, and 123 ms. A 305 ms
+  decode/processing task remains. Visually checked all three textures.
+- Dispatching a second drop and a focus event during Awhina import completed
+  one preparation sequence, with no competing load or browser error.
+- Replacing K XI with Awhina now reframes the camera for the new file. Switching
+  original/optimised previews retains the existing camera behavior.
+
+A single large GPU upload is still synchronous. This improves feedback and
+separates stages, but does not promise a stall-free browser or change the WASM
+memory ceiling. OBJ/FBX synchronous parsing has not been moved to a worker.
+
+Reproduce with `npm run test:browser-serve`, open `index.html?test=1`, and drop
+the local K XI/Awhina models. A PerformanceObserver for `longtask` and a DevTools
+CPU profile can distinguish parsing from GPU upload. With `test=1`,
+`window.__belowOptimiserPreviewPreparation` records each upload's dimensions
+and elapsed time. `npm run test:browser-unit` covers staged unique uploads,
+visibility restoration on failure, optional shader preparation, and paint waits.
+
 ## Reproduce
 
 From the repository root:
