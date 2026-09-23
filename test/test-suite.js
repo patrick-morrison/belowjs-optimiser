@@ -435,6 +435,10 @@ async function runTestSuite() {
   console.log(chalk.bold('  AUTOMATED CHECKS:\n'));
 
   let allPassed = true;
+  if (unpackSuccess !== total || reoptSuccess !== total) {
+    console.log(chalk.red('  Unpack/repack or re-optimise tests failed.'));
+    allPassed = false;
+  }
 
   // Check 1: All pack tests should succeed
   if (packSuccess === total) {

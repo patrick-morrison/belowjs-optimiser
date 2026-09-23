@@ -10,18 +10,14 @@ This document reflects the current browser implementation in `index.html` and `b
 
 ### Import map modules (ESM)
 
-- `three` -> `https://esm.sh/three@0.170.0`
-- `belowjs` -> `./browser/belowjs.js`
-- `@gltf-transform/core` -> `https://esm.sh/@gltf-transform/core@4`
-- `@gltf-transform/extensions` -> `https://esm.sh/@gltf-transform/extensions@4`
-- `@gltf-transform/functions` -> `https://esm.sh/@gltf-transform/functions@4`
+- `three` -> `https://esm.sh/three@0.179.1`
+- `belowjs` -> `./browser/belowjs.js` (published 1.9.1, JS and CSS together)
+- `@gltf-transform/core` -> `https://esm.sh/@gltf-transform/core@4.4.2`
+- `@gltf-transform/extensions` -> 4.4.2 with core externalized to the import map
+- `@gltf-transform/functions` -> 4.4.2 with core and extensions externalized to the import map (avoids duplicate document registries)
 - `meshoptimizer` -> `https://esm.sh/meshoptimizer@0.21.0`
-- `three/examples/jsm/loaders/KTX2Loader.js` -> `https://unpkg.com/three@0.170.0/examples/jsm/loaders/KTX2Loader.js`
-- `three/examples/jsm/loaders/OBJLoader.js` -> `https://unpkg.com/three@0.170.0/examples/jsm/loaders/OBJLoader.js`
-- `three/examples/jsm/loaders/MTLLoader.js` -> `https://unpkg.com/three@0.170.0/examples/jsm/loaders/MTLLoader.js`
-- `three/examples/jsm/loaders/FBXLoader.js` -> `https://unpkg.com/three@0.170.0/examples/jsm/loaders/FBXLoader.js`
-- `three/examples/jsm/exporters/GLTFExporter.js` -> `https://unpkg.com/three@0.170.0/examples/jsm/exporters/GLTFExporter.js`
-- `ktx2-encoder` -> `./browser/ktx2-encoder.js?v=20260207c`
+- Three.js loaders, exporters, and Basis transcoder assets are pinned to 0.179.1.
+- The disposable module worker imports `./browser/ktx2-encoder.js?v=20260923`.
 - `ktx-parse` -> `https://unpkg.com/ktx-parse@0.7.1/dist/ktx-parse.esm.js`
 
 ### UMD globals (script tags)
@@ -42,9 +38,14 @@ Note: `browser/draco_encoder.js` exists in the repo, but the active browser runt
 - Local files used at runtime:
   - `browser/basis_encoder.js`
   - `browser/basis_encoder.wasm`
-- Original upstream source used to fetch/update these:
+- Original prebuilt upstream files used before the large-texture browser rebuild:
   - `https://unpkg.com/ktx2-encoder@0.5.1/dist/basis/basis_encoder.js`
   - `https://unpkg.com/ktx2-encoder@0.5.1/dist/basis/basis_encoder.wasm`
+- Current browser files are rebuilt from Binomial Basis Universal `v1_50_0_2`, matching the previous vendored WASM version, with:
+  - `-s ALLOW_MEMORY_GROWTH=1`
+  - `-s MAXIMUM_MEMORY=4GB`
+  - `-s EXPORTED_RUNTIME_METHODS=['HEAP8']`
+- The 4GB build is required for full-resolution 8192x8192 ETC1S KTX2 with mipmaps in browser mode. The older prebuilt wrapper capped the heap at 2GB.
 
 ### Local browser wrapper
 
@@ -59,7 +60,10 @@ What it does:
 - Applies encoder options with v1/v2 method fallbacks:
   - `setKTX2SRGBTransferFunc` -> fallback `setKTX2AndBasisSRGBTransferFunc`
   - `setCompressionLevel` -> fallback `setETC1SCompressionLevel`
-- Decodes input image bytes via WebGL2 + `createImageBitmap` before `setSliceSourceImage(..., RAW)`.
+- Decodes input through `createImageBitmap` and a 2D OffscreenCanvas, then closes both.
+- Passes a typed-array view to WASM without duplicating the full RGBA pixel buffer.
+- Deletes the encoder even on failure and terminates the worker after every texture.
+- Uses each material slot's color space for transfer metadata, perceptual encoding, and mip generation.
 
 ---
 
@@ -95,14 +99,15 @@ Within `optimizeModel()`:
 2. `weld()`
 3. `join()`
 4. `simplify()` only if triangles > 1.2M
-5. Optional resize transform:
-   - `textureCompress({ resize: [8192, 8192] })`
-   - Only added if any source texture dimension exceeds 8192
-6. `draco(...)` with 20-bit quantization
-7. KTX2 conversion (sequential, one texture at a time) via `encodeToKTX2(...)`
-8. `io.writeBinary(...)`
+5. Texture dimension inspection:
+   - Default mode downscales textures over 4096px sequentially before KTX2.
+   - Full-res mode preserves source dimensions and skips the downscale pass.
+6. Optional sequential texture downscale to 4096px cap.
+7. `draco(...)` with 20-bit quantization
+8. KTX2 conversion (sequential, one texture at a time) via a disposable module Worker and `encodeToKTX2(...)`
+9. `io.writeBinary(...)`
 
-Note on naming: the returned `convertedCount` field from `convertTexturesToKtx2Sequential()` is currently `candidates.length` (legacy name), while skip counts are tracked separately.
+Candidates are refreshed after deduplication. Each encoded texture must retain its prepared dimensions and complete mip chain before the GLB is written. A failed texture fails the operation rather than silently leaving an uncompressed source.
 
 ---
 
@@ -116,16 +121,21 @@ Note on naming: the returned `convertedCount` field from `convertTexturesToKtx2S
 
 ### Limits/policy
 
-- Max dimension threshold for optional resize transform: `8192`
-- Max per-texture texels for Basis WASM encode path: `8192 * 8192` (`67,108,864`)
+- Default browser mode caps source textures at 4096px before KTX2 encoding.
+- The resize uses a sequential 2D canvas pass, rounds dimensions to multiples of four, and uses lossless PNG as the intermediate. This avoids an extra lossy JPEG generation.
+- Full source dimensions are preserved only when the `Full-res textures` option is enabled.
+- Mipmaps remain enabled for browser KTX2 output.
+- The browser Basis encoder is a 4GB-memory rebuild of the version-matched upstream encoder.
 - No automatic padding and no automatic WASM-cap downscale during sequential encode step.
 
 If a texture in the KTX2 step is:
 
-- above WASM texel cap -> skipped (left as original source image)
-- not multiple-of-4 in width/height -> skipped (left as original source image)
+- above practical browser/WASM memory capacity -> optimisation fails with the texture name and dimensions
+- not multiple-of-4 in width/height -> optimisation fails with the texture name and dimensions
 
-Result: browser path preserves source texture data for those textures instead of resizing/padding in that stage.
+Result: browser path defaults to a memory-lower 4096px KTX2 path, while full-resolution preservation remains available as an explicit option.
+
+Full-resolution means source dimensions are retained; ETC1S and UASTC texture compression are still lossy. Keep the original model as the preservation master.
 
 ---
 
@@ -157,7 +167,7 @@ These shortcuts are ignored while typing in form fields and while optimisation i
 ## Known Caveats
 
 - Browser memory constraints still apply; very large models/textures may fail.
-- Some textures may remain uncompressed in browser mode due to WASM cap or 4x4 alignment constraints.
+- Full-resolution KTX2 encoding still depends on browser and WASM memory capacity, even with the 4GB encoder build.
 - Source-map 404 warnings from third-party packages do not affect runtime behavior.
 
 ---
@@ -167,8 +177,9 @@ These shortcuts are ignored while typing in form fields and while optimisation i
 To refresh local Basis files from upstream:
 
 ```bash
-curl -L -o browser/basis_encoder.js "https://unpkg.com/ktx2-encoder@0.5.1/dist/basis/basis_encoder.js"
-curl -L -o browser/basis_encoder.wasm "https://unpkg.com/ktx2-encoder@0.5.1/dist/basis/basis_encoder.wasm"
+# Legacy prebuilt 2GB encoder, kept only for reference:
+# curl -L -o browser/basis_encoder.js "https://unpkg.com/ktx2-encoder@0.5.1/dist/basis/basis_encoder.js"
+# curl -L -o browser/basis_encoder.wasm "https://unpkg.com/ktx2-encoder@0.5.1/dist/basis/basis_encoder.wasm"
 ```
 
 After update:

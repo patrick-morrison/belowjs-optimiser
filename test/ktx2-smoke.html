@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KTX2 Worker Smoke Test</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 24px;
+      background: #111827;
+      color: #e5e7eb;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      max-width: 980px;
+      margin: 0 auto;
+      display: grid;
+      gap: 16px;
+    }
+
+    pre {
+      margin: 0;
+      padding: 16px;
+      min-height: 220px;
+      overflow: auto;
+      background: #020617;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
+
+    .status {
+      font-weight: 700;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="status" id="status">Starting...</div>
+    <pre id="log"></pre>
+  </main>
+
+  <script type="module">
+    import { read } from "https://unpkg.com/ktx-parse@0.7.1/dist/ktx-parse.esm.js";
+    import { validateTexture } from "./texture-validation.js";
+
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+    const params = new URLSearchParams(window.location.search);
+    const modelPath = params.get('model') || '/test/models/dutch_submarine_hnlms_kxi.glb';
+    const textureIndex = Number.parseInt(params.get('texture') || '0', 10);
+    const workerUrl = new URL('../browser/ktx2-worker.js?v=20260923', window.location.href).href;
+    const basisJsUrl = new URL('../browser/basis_encoder.js?v=20260619d', window.location.href).href;
+    const basisWasmUrl = new URL('../browser/basis_encoder.wasm?v=20260619d', window.location.href).href;
+
+    window.__ktx2Smoke = {
+      status: 'starting',
+      events: [],
+      result: null,
+      error: null
+    };
+
+    function log(message, data = null) {
+      const entry = {
+        t: Math.round(performance.now()),
+        message,
+        data
+      };
+      window.__ktx2Smoke.events.push(entry);
+      logEl.textContent += `${entry.t}ms ${message}${data ? ` ${JSON.stringify(data)}` : ''}\n`;
+    }
+
+    function setStatus(value) {
+      window.__ktx2Smoke.status = value;
+      statusEl.textContent = value;
+    }
+
+    function readUint32(view, offset) {
+      return view.getUint32(offset, true);
+    }
+
+    function parseGlb(arrayBuffer) {
+      const view = new DataView(arrayBuffer);
+      if (readUint32(view, 0) !== 0x46546c67) {
+        throw new Error('Not a GLB file.');
+      }
+      const length = readUint32(view, 8);
+      let offset = 12;
+      let json = null;
+      let bin = null;
+
+      while (offset < length) {
+        const chunkLength = readUint32(view, offset);
+        const chunkType = readUint32(view, offset + 4);
+        const chunkStart = offset + 8;
+        const chunk = arrayBuffer.slice(chunkStart, chunkStart + chunkLength);
+
+        if (chunkType === 0x4e4f534a) {
+          json = JSON.parse(new TextDecoder().decode(chunk));
+        } else if (chunkType === 0x004e4942) {
+          bin = chunk;
+        }
+
+        offset = chunkStart + chunkLength;
+      }
+
+      if (!json || !bin) {
+        throw new Error('GLB is missing JSON or BIN chunk.');
+      }
+
+      return { json, bin };
+    }
+
+    function extractImage(glb, index) {
+      const image = glb.json.images?.[index];
+      if (!image) {
+        throw new Error(`Texture image ${index} not found.`);
+      }
+      if (typeof image.bufferView !== 'number') {
+        throw new Error(`Texture image ${index} is not stored in a GLB bufferView.`);
+      }
+
+      const view = glb.json.bufferViews?.[image.bufferView];
+      if (!view) {
+        throw new Error(`Texture image ${index} references a missing bufferView.`);
+      }
+
+      const start = view.byteOffset || 0;
+      const end = start + view.byteLength;
+      return {
+        name: image.name || `image_${index}`,
+        mimeType: image.mimeType || 'image/png',
+        bytes: glb.bin.slice(start, end)
+      };
+    }
+
+    function encodeInWorker(imageBytes) {
+      return new Promise((resolve, reject) => {
+        const worker = new Worker(workerUrl, { type: 'module' });
+        const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+        worker.onmessage = (event) => {
+          const data = event.data || {};
+          if (data.id !== id) return;
+          worker.terminate();
+
+          if (data.ok) {
+            resolve(data.ktx2Buffer);
+          } else {
+            reject(new Error(data.error || 'Worker encode failed.'));
+          }
+        };
+
+        worker.onerror = (event) => {
+          worker.terminate();
+          reject(new Error(event.message || 'Worker crashed.'));
+        };
+
+        worker.postMessage({
+          id,
+          imageBuffer: imageBytes,
+          options: {
+            isUASTC: params.get('uastc') === '1',
+            enableDebug: params.get('debug') === '1',
+            generateMipmap: true,
+            qualityLevel: Number.parseInt(params.get('quality') || '64', 10),
+            wasmUrl: basisWasmUrl,
+            jsUrl: basisJsUrl
+          }
+        }, [imageBytes]);
+      });
+    }
+
+    try {
+      setStatus('fetching model');
+      log('fetch', { modelPath, textureIndex });
+      const response = await fetch(modelPath);
+      if (!response.ok) {
+        throw new Error(`Fetch failed: ${response.status} ${response.statusText}`);
+      }
+
+      const glb = parseGlb(await response.arrayBuffer());
+      const image = extractImage(glb, textureIndex);
+      log('image extracted', {
+        name: image.name,
+        mimeType: image.mimeType,
+        bytes: image.bytes.byteLength
+      });
+
+      let bitmap = await createImageBitmap(new Blob([image.bytes], { type: image.mimeType }));
+      const size = Number(params.get('size'));
+      if (size > 0 && Math.max(bitmap.width, bitmap.height) > size) {
+        const scale = size / Math.max(bitmap.width, bitmap.height);
+        const canvas = new OffscreenCanvas(Math.round(bitmap.width * scale), Math.round(bitmap.height * scale));
+        canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+        image.bytes = await (await canvas.convertToBlob({ type: 'image/png' })).arrayBuffer();
+        bitmap.close();
+        bitmap = await createImageBitmap(new Blob([image.bytes]));
+        canvas.width = canvas.height = 1;
+      }
+      log('image decoded', {
+        width: bitmap.width,
+        height: bitmap.height,
+        pixels: bitmap.width * bitmap.height
+      });
+      bitmap.close();
+
+      setStatus('encoding ktx2');
+      const started = performance.now();
+      const ktx2Buffer = await encodeInWorker(image.bytes.slice(0));
+      const elapsedMs = Math.round(performance.now() - started);
+      log('worker encoded', {
+        elapsedMs,
+        bytes: ktx2Buffer.byteLength
+      });
+
+      const container = read(new Uint8Array(ktx2Buffer));
+      const levels = container.levels?.length || 0;
+      const outputBytes = ktx2Buffer.byteLength;
+      const validation = await validateTexture(image.bytes, ktx2Buffer, container);
+      window.__ktx2Smoke.result = {
+        ok: true,
+        elapsedMs,
+        bytes: outputBytes,
+        pixelWidth: container.pixelWidth,
+        pixelHeight: container.pixelHeight,
+        levels,
+        validation,
+        supercompressionScheme: container.supercompressionScheme,
+        vkFormat: container.vkFormat
+      };
+      log('ktx2 parsed', window.__ktx2Smoke.result);
+      setStatus('pass');
+    } catch (err) {
+      window.__ktx2Smoke.error = {
+        message: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : ''
+      };
+      log('failed', window.__ktx2Smoke.error);
+      setStatus('fail');
+    }
+  </script>
+</body>
+</html>
