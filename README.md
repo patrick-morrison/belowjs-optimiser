@@ -28,13 +28,15 @@ You can also try the browser-based optimiser (experimental):
 
 https://patrick-morrison.github.io/belowjs-optimiser/
 
-Browser optimisation defaults to a 4096px texture cap. Enable **Full-res
-textures** in the Optimise controls to keep source dimensions. Both modes
+Browser optimisation preserves source texture dimensions by default. Uncheck
+**Full-res textures** in the Optimise controls to opt into a 4096px cap. Both modes
 produce KTX2 with mipmaps; full-resolution encoding needs more memory and time.
 KTX2 compression is lossy even when dimensions are preserved, so retain the
 original model as the preservation master.
 
 Browser implementation and repeatable checks: [browser/methods.md](browser/methods.md).
+The Basis 2.5 build, browser limits, threading requirements and measured comparisons
+are documented in [the encoder upgrade report](docs/BASIS_BROWSER_UPGRADE.md).
 
 ## Required dependency: KTX-Software
 

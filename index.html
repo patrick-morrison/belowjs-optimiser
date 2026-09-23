@@ -381,12 +381,9 @@
     .model-stats .texture-policy {
       display: flex;
       align-items: center;
-      gap: 8px;
-      min-height: 32px;
-      padding: 7px 8px;
-      border: 1px solid #475569;
-      border-radius: 6px;
-      background: rgba(15, 23, 42, 0.75);
+      gap: 6px;
+      min-height: 24px;
+      padding: 2px 0;
       color: #cbd5e1;
       font-size: 12px;
       cursor: pointer;
@@ -394,8 +391,9 @@
     }
 
     .model-stats .texture-policy input {
-      width: 15px;
-      height: 15px;
+      width: 14px;
+      height: 14px;
+      flex: 0 0 14px;
       margin: 0;
       accent-color: #60a5fa;
     }
@@ -829,8 +827,8 @@
           <input type="file" id="textureInput" accept="image/*" multiple style="display: none;">
         </div>
         <label class="texture-policy" id="texturePolicyControls" style="display: none;"
-          title="Unchecked keeps browser KTX2 memory lower by capping source textures at 4096px">
-          <input type="checkbox" id="preserveFullResTextures">
+          title="Preserve source dimensions. Uncheck to cap textures at 4096px.">
+          <input type="checkbox" id="preserveFullResTextures" checked>
           <span>Full-res textures</span>
         </label>
         <div class="transform-group" id="transformTools" style="display: none;">
@@ -890,6 +888,7 @@
   </div>
 
   <script type="module">
+    import { encoderURLs, getBrowserEncoderBackend, MAX_SOURCE_PIXELS } from './browser/encoder-backend.js?v=basis25-20260923';
     import { ModelViewer } from 'belowjs';
     import { WebIO, ImageUtils } from '@gltf-transform/core';
     import * as THREE from 'three';
@@ -3445,12 +3444,8 @@
     }
 
     const KTX2_SUPPORTED_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
-    const MAX_BROWSER_KTX2_ENCODE_DIMENSION = 4096;
-    const MAX_BROWSER_TEXTURE_DIMENSION = MAX_BROWSER_KTX2_ENCODE_DIMENSION;
-    const MAX_BASIS_SOURCE_IMAGE_PIXELS = MAX_BROWSER_KTX2_ENCODE_DIMENSION * MAX_BROWSER_KTX2_ENCODE_DIMENSION;
-    const BASIS_ENCODER_JS_URL = new URL('./browser/basis_encoder.js?v=20260619d', window.location.href).href;
-    const BASIS_ENCODER_WASM_URL = new URL('./browser/basis_encoder.wasm?v=20260619d', window.location.href).href;
-    const KTX2_WORKER_URL = new URL('./browser/ktx2-worker.js?v=20260923', window.location.href).href;
+    const MAX_BROWSER_TEXTURE_DIMENSION = 4096;
+    const KTX2_WORKER_URL = new URL('./browser/ktx2-worker.js?v=basis25-20260923', window.location.href).href;
 
     function setTextureResizeState(state = {}) {
       textureResizeState = {
@@ -3468,7 +3463,7 @@
       const preserveFullResolution = shouldPreserveFullResolutionTextures();
       if (textureResizeState.needsWasmTexelDownscale) {
         return preserveFullResolution
-          ? 'Some textures exceed the conservative browser KTX2 size target; full-resolution KTX2 will still be attempted.'
+          ? 'Some textures exceed the browser 67.1-megapixel limit; full-resolution encoding requires the CLI.'
           : `Textures over ${MAX_BROWSER_TEXTURE_DIMENSION}px will be downscaled before KTX2.`;
       }
       if (textureResizeState.needsBlockAlign) {
@@ -3528,7 +3523,7 @@
           maxDimension: maxDimension ?? null,
           maxPixels: maxPixels ?? null,
           needsDownscale: !!maxDimension && maxDimension > MAX_BROWSER_TEXTURE_DIMENSION,
-          needsWasmTexelDownscale: !!maxPixels && maxPixels > MAX_BASIS_SOURCE_IMAGE_PIXELS,
+          needsWasmTexelDownscale: !!maxPixels && maxPixels > MAX_SOURCE_PIXELS,
           needsBlockAlign
         };
       } catch (err) {
@@ -3551,6 +3546,9 @@
 
       if (needsBlockAlign) {
         throw new Error(`glTF KTX2 requires dimensions divisible by 4 for "${label}" (${sourceWidth}x${sourceHeight}).`);
+      }
+      if (pixels > MAX_SOURCE_PIXELS) {
+        throw new Error(`"${label}" exceeds the browser encoder's 8192x8192-pixel budget. Use the CLI for this full-resolution texture; no pixels were resized.`);
       }
 
       return {
@@ -3612,26 +3610,51 @@
       return resizedCount;
     }
 
-    function encodeTextureToKtx2InWorker(imageData, options) {
+    async function encodeTextureToKtx2InWorker(imageData, options, backend = getBrowserEncoderBackend()) {
+      try {
+        return await runTextureWorker(imageData, { ...options, ...encoderURLs(backend) });
+      } catch (error) {
+        if (!backend.threads) throw error;
+        // Retry in a fresh heap, retaining the original resolution, codec and mipmaps.
+        const result = await runTextureWorker(imageData, { ...options, ...encoderURLs({ kind: 'single', threads: 0 }) });
+        window.__belowOptimiserLastWorkerResult.fallbackReason = error.message;
+        return result;
+      }
+    }
+
+    function runTextureWorker(imageData, options) {
       return new Promise((resolve, reject) => {
         const worker = new Worker(KTX2_WORKER_URL, { type: 'module' });
         const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
         let settled = false;
+        let timeout;
 
         const finish = (fn, value) => {
           if (settled) return;
           settled = true;
+          clearTimeout(timeout);
           worker.terminate();
+          if (fn === reject) {
+            window.__belowOptimiserLastWorkerResult = { ok: false, error: value.message, backend: options.backend };
+          }
           fn(value);
         };
+        timeout = setTimeout(() => finish(reject, new Error('KTX2 encoder startup timed out.')), 30000);
 
         worker.onmessage = (event) => {
           const data = event.data || {};
           if (data.id !== id) return;
+          if (data.phase === 'initialized') {
+            clearTimeout(timeout);
+            timeout = setTimeout(() => finish(reject, new Error('KTX2 encoding exceeded ten minutes.')), 600000);
+            return;
+          }
           if (data.ok) {
             window.__belowOptimiserLastWorkerResult = {
               ok: true,
-              bytes: data.ktx2Buffer?.byteLength || 0
+              bytes: data.ktx2Buffer?.byteLength || 0,
+              backend: options.backend,
+              diagnostics: data.diagnostics
             };
             finish(resolve, new Uint8Array(data.ktx2Buffer));
           } else {
@@ -3651,9 +3674,14 @@
           finish(reject, new Error(event.message || 'KTX2 worker crashed.'));
         };
 
-        // The document may share this storage with another texture or buffer view.
-        const buffer = imageData.slice().buffer;
-        worker.postMessage({ id, imageBuffer: buffer, options }, [buffer]);
+        worker.onmessageerror = () => finish(reject, new Error('Unable to read the KTX2 worker result.'));
+        try {
+          // The document may share this storage with another texture or buffer view.
+          const buffer = imageData.slice().buffer;
+          worker.postMessage({ id, imageBuffer: buffer, options }, [buffer]);
+        } catch (error) {
+          finish(reject, error);
+        }
       });
     }
 
@@ -3997,8 +4025,7 @@
             enableDebug: false,
             generateMipmap: true,
             qualityLevel: 64, // ETC1S quality level
-            wasmUrl: BASIS_ENCODER_WASM_URL,
-            jsUrl: BASIS_ENCODER_JS_URL
+            compressionLevel: 2
           },
           ({ phase, current, completed, total, label, converted, skipReason }) => {
             if (phase === 'start') {
@@ -5021,9 +5048,9 @@
 
       const textureSizeParam = (params.get('textureSize') || params.get('textures') || '').trim().toLowerCase();
       if (preserveFullResTexturesInput) {
-        if (['full', 'full-res', 'fullres', 'source', 'preserve'].includes(textureSizeParam)) {
+        if (['full', 'full-res', 'fullres', 'source', 'preserve', 'default'].includes(textureSizeParam)) {
           preserveFullResTexturesInput.checked = true;
-        } else if (['4k', '4096', 'cap', 'default', 'downscale'].includes(textureSizeParam)) {
+        } else if (['4k', '4096', 'cap', 'downscale'].includes(textureSizeParam)) {
           preserveFullResTexturesInput.checked = false;
         }
       }

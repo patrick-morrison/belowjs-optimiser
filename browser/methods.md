@@ -41,11 +41,18 @@ Note: `browser/draco_encoder.js` exists in the repo, but the active browser runt
 - Original prebuilt upstream files used before the large-texture browser rebuild:
   - `https://unpkg.com/ktx2-encoder@0.5.1/dist/basis/basis_encoder.js`
   - `https://unpkg.com/ktx2-encoder@0.5.1/dist/basis/basis_encoder.wasm`
-- Current browser files are rebuilt from Binomial Basis Universal `v1_50_0_2`, matching the previous vendored WASM version, with:
+- Current files use Basis Universal 2.5, pinned at `99f52d63aa6799cbdaecfe977111dc5ec3b31d47`, with:
   - `-s ALLOW_MEMORY_GROWTH=1`
   - `-s MAXIMUM_MEMORY=4GB`
   - `-s EXPORTED_RUNTIME_METHODS=['HEAP8']`
 - The 4GB build is required for full-resolution 8192x8192 ETC1S KTX2 with mipmaps in browser mode. The older prebuilt wrapper capped the heap at 2GB.
+- `basis_encoder_threads.js/.wasm` is a separate optional four-helper build. The
+  backend selector requires cross-origin isolation and shared-memory support,
+  avoids known unsafe WebKit versions and low-memory devices, and retries a
+  failed threaded encode once in a new single-thread worker.
+- GitHub Pages currently uses the single-thread build because it lacks COOP/COEP.
+- Exact hashes: `basis-build.json`. Source patches and measured comparisons:
+  [encoder upgrade report](../docs/BASIS_BROWSER_UPGRADE.md).
 
 ### Local browser wrapper
 
@@ -62,6 +69,8 @@ What it does:
   - `setCompressionLevel` -> fallback `setETC1SCompressionLevel`
 - Decodes input through `createImageBitmap` and a 2D OffscreenCanvas, then closes both.
 - Passes a typed-array view to WASM without duplicating the full RGBA pixel buffer.
+- The compiled wrapper copies raw RGBA directly into the source image and opts
+  into releasing that image after the compressor has copied it.
 - Deletes the encoder even on failure and terminates the worker after every texture.
 - Uses each material slot's color space for transfer metadata, perceptual encoding, and mip generation.
 
@@ -100,7 +109,7 @@ Within `optimizeModel()`:
 3. `join()`
 4. `simplify()` only if triangles > 1.2M
 5. Texture dimension inspection:
-   - Default mode downscales textures over 4096px sequentially before KTX2.
+   - Full resolution is the default; the optional 4K mode downscales sequentially before KTX2.
    - Full-res mode preserves source dimensions and skips the downscale pass.
 6. Optional sequential texture downscale to 4096px cap.
 7. `draco(...)` with 20-bit quantization
@@ -121,11 +130,12 @@ Candidates are refreshed after deduplication. Each encoded texture must retain i
 
 ### Limits/policy
 
-- Default browser mode caps source textures at 4096px before KTX2 encoding.
+- Browser mode preserves source dimensions by default. Uncheck Full-res textures to opt into the 4096px cap.
 - The resize uses a sequential 2D canvas pass, rounds dimensions to multiples of four, and uses lossless PNG as the intermediate. This avoids an extra lossy JPEG generation.
-- Full source dimensions are preserved only when the `Full-res textures` option is enabled.
+- The `Full-res textures` option starts enabled and is never silently cleared on failure.
 - Mipmaps remain enabled for browser KTX2 output.
-- The browser Basis encoder is a 4GB-memory rebuild of the version-matched upstream encoder.
+- The Basis 2.5 WASM32 heap can grow to 4 GiB; input is limited to 67,108,864 pixels
+  (8192 square). This is a tested ceiling, not a promise that every device has enough RAM.
 - No automatic padding and no automatic WASM-cap downscale during sequential encode step.
 
 If a texture in the KTX2 step is:
@@ -133,7 +143,7 @@ If a texture in the KTX2 step is:
 - above practical browser/WASM memory capacity -> optimisation fails with the texture name and dimensions
 - not multiple-of-4 in width/height -> optimisation fails with the texture name and dimensions
 
-Result: browser path defaults to a memory-lower 4096px KTX2 path, while full-resolution preservation remains available as an explicit option.
+Result: full-resolution KTX2 is the default; the user can explicitly choose a lower-memory 4096px derivative.
 
 Full-resolution means source dimensions are retained; ETC1S and UASTC texture compression are still lossy. Keep the original model as the preservation master.
 
@@ -174,12 +184,12 @@ These shortcuts are ignored while typing in form fields and while optimisation i
 
 ## Updating Local Encoder Assets
 
-To refresh local Basis files from upstream:
+To build reproducible candidates without overwriting production assets:
 
 ```bash
-# Legacy prebuilt 2GB encoder, kept only for reference:
-# curl -L -o browser/basis_encoder.js "https://unpkg.com/ktx2-encoder@0.5.1/dist/basis/basis_encoder.js"
-# curl -L -o browser/basis_encoder.wasm "https://unpkg.com/ktx2-encoder@0.5.1/dist/basis/basis_encoder.wasm"
+bash scripts/build-basis.sh single
+bash scripts/build-basis.sh threads
+npm run test:browser-unit
 ```
 
 After update:
@@ -187,7 +197,7 @@ After update:
 1. Validate browser optimise flow end-to-end.
 2. Confirm KTX2 conversion still works for:
    - standard textures
-   - skipped textures (WASM cap / non-4x4)
+   - named, recoverable errors for unsupported dimensions (never silent skipping)
 3. Confirm progress UI still updates through Draco -> KTX2 -> write stages.
 
 ---

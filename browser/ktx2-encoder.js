@@ -103,6 +103,8 @@ async function decodeImageBitmap(imageBuffer) {
 }
 
 let modulePromise = null;
+let diagnostics = null;
+export function getEncoderDiagnostics() { return diagnostics; }
 const scriptLoadPromiseMap = new Map();
 const DEFAULT_WASM_URL = new URL("./basis_encoder.wasm", import.meta.url).href;
 const DEFAULT_JS_URL = new URL("./basis_encoder.js", import.meta.url).href;
@@ -201,12 +203,22 @@ async function initBasisModule(options = {}) {
 
         modulePromise = Promise.all([
             loadBasisFactory(jsUrl),
-            wasmUrl ? fetch(wasmUrl).then((res) => res.arrayBuffer()) : undefined
+            wasmUrl ? fetch(wasmUrl).then((res) => {
+                if (!res.ok) throw new Error(`Failed to fetch encoder WASM: ${res.status}`);
+                return res.arrayBuffer();
+            }) : undefined
         ])
-            .then(([BASIS, wasmBinary]) => BASIS({ wasmBinary }))
+            .then(([BASIS, wasmBinary]) => BASIS({
+                wasmBinary,
+                mainScriptUrlOrBlob: jsUrl,
+                locateFile: (path) => new URL(path, jsUrl).href
+            }))
             .then((Module) => {
             Module.initializeBasis();
             return Module;
+        }).catch((error) => {
+            modulePromise = null;
+            throw error;
         });
     }
     return modulePromise;
@@ -214,10 +226,20 @@ async function initBasisModule(options = {}) {
 
 async function encodeInternal(bufferOrBufferArray, options = {}) {
     options = { ...DefaultOptions, ...options };
+    const started = performance.now();
     const basisModule = await initBasisModule(options);
+    options.onInitialized?.();
+    diagnostics = { initMs: Math.round(performance.now() - started), threads: options.threads || 0 };
     const encoder = new basisModule.BasisEncoder();
     try {
         applyInputOptions(options, encoder);
+        // Workers dispose this instance after one encode; don't retain a redundant source copy.
+        diagnostics.sourceRelease = typeof encoder.setReleaseSourceImages === "function";
+        if (diagnostics.sourceRelease) encoder.setReleaseSourceImages(true);
+        if (options.threads) {
+            if (typeof encoder.controlThreading !== "function") throw new Error("Encoder does not support threading.");
+            encoder.controlThreading(true, Math.min(4, options.threads));
+        }
         const isCube = Array.isArray(bufferOrBufferArray) && bufferOrBufferArray.length === 6;
         encoder.setTexType(isCube ? BasisTextureType.cBASISTexTypeCubemapArray : BasisTextureType.cBASISTexType2D);
 
@@ -238,7 +260,8 @@ async function encodeInternal(bufferOrBufferArray, options = {}) {
             }
         }
 
-        const bytesPerPixelBudget = options.isHDR ? 4 : (options.isUASTC ? 2 : 0.5);
+        // ETC1S alpha uses a second block stream; opaque-only sizing can reject RGBA output.
+        const bytesPerPixelBudget = options.isHDR ? 4 : (options.isUASTC ? 2 : 1);
         const mipBudget = options.generateMipmap === false ? 1 : 4 / 3;
         const estimatedBytes = Math.ceil(decodedPixels * bytesPerPixelBudget * mipBudget) + (4 * 1024 * 1024);
         const outputBytes = Math.max(
@@ -247,7 +270,13 @@ async function encodeInternal(bufferOrBufferArray, options = {}) {
             estimatedBytes
         );
         const ktx2FileData = new Uint8Array(outputBytes);
+        const encodeStarted = performance.now();
+        diagnostics.inputMs = Math.round(encodeStarted - started - diagnostics.initMs);
+        diagnostics.heapBeforeEncode = basisModule.HEAP8?.buffer.byteLength ?? null;
         const byteLength = encoder.encode(ktx2FileData);
+        diagnostics.encodeMs = Math.round(performance.now() - encodeStarted);
+        diagnostics.heapCapacityBytes = basisModule.HEAP8?.buffer.byteLength ?? null;
+        diagnostics.outputCapacityBytes = outputBytes;
         if (byteLength === 0) {
             throw new Error(`Encode failed. Output buffer was ${Math.round(outputBytes / (1024 * 1024))} MiB.`);
         }

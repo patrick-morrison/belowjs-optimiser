@@ -52,9 +52,13 @@
     const params = new URLSearchParams(window.location.search);
     const modelPath = params.get('model') || '/test/models/dutch_submarine_hnlms_kxi.glb';
     const textureIndex = Number.parseInt(params.get('texture') || '0', 10);
-    const workerUrl = new URL('../browser/ktx2-worker.js?v=20260923', window.location.href).href;
-    const basisJsUrl = new URL('../browser/basis_encoder.js?v=20260619d', window.location.href).href;
-    const basisWasmUrl = new URL('../browser/basis_encoder.wasm?v=20260619d', window.location.href).href;
+    const workerUrl = new URL('../browser/ktx2-worker.js?v=basis25-20260923', window.location.href).href;
+    const backend = params.get('backend') || 'current';
+    const base = backend === 'baseline' ? './output/basis-baseline/' : backend === 'current' ? '../browser/' : './output/basis-candidate/';
+    const stem = backend === 'threads' ? 'basis_encoder_threads' : backend === 'wasm64' ? 'basis_encoder_threads_wasm64' : 'basis_encoder';
+    const basisJsUrl = new URL(`${base}${stem}.js?v=20260923-basis25`, window.location.href).href;
+    const basisWasmUrl = new URL(`${base}${stem}.wasm?v=20260923-basis25`, window.location.href).href;
+    let diagnostics;
 
     window.__ktx2Smoke = {
       status: 'starting',
@@ -145,9 +149,11 @@
         worker.onmessage = (event) => {
           const data = event.data || {};
           if (data.id !== id) return;
+          if (data.phase) return;
           worker.terminate();
 
           if (data.ok) {
+            diagnostics = data.diagnostics;
             resolve(data.ktx2Buffer);
           } else {
             reject(new Error(data.error || 'Worker encode failed.'));
@@ -167,6 +173,8 @@
             enableDebug: params.get('debug') === '1',
             generateMipmap: true,
             qualityLevel: Number.parseInt(params.get('quality') || '64', 10),
+            compressionLevel: Number.parseInt(params.get('effort') || '2', 10),
+            threads: backend === 'threads' || backend === 'wasm64' ? Number(params.get('threads') || 4) : 0,
             wasmUrl: basisWasmUrl,
             jsUrl: basisJsUrl
           }
@@ -220,9 +228,13 @@
       const container = read(new Uint8Array(ktx2Buffer));
       const levels = container.levels?.length || 0;
       const outputBytes = ktx2Buffer.byteLength;
+      const sha256 = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', ktx2Buffer)), b => b.toString(16).padStart(2, '0')).join('');
       const validation = await validateTexture(image.bytes, ktx2Buffer, container);
       window.__ktx2Smoke.result = {
         ok: true,
+        backend,
+        sha256,
+        diagnostics,
         elapsedMs,
         bytes: outputBytes,
         pixelWidth: container.pixelWidth,

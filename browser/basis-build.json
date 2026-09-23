@@ -1,0 +1,17 @@
+{
+  "version": "2.5",
+  "source": "https://github.com/BinomialLLC/basis_universal",
+  "commit": "99f52d63aa6799cbdaecfe977111dc5ec3b31d47",
+  "archiveSHA256": "82fa2a5f3344d55ef97c6b3823ceee3588e912281cf72e7b6d6a0bcd5ab0c490",
+  "compiler": "Emscripten 4.0.8-git",
+  "build": "Release -O3; upstream webgl/encoder/CMakeLists.txt plus scripts/prepare-basis.mjs",
+  "maximumMemoryBytes": 4294967296,
+  "maximumSourcePixels": 67108864,
+  "pthreadPoolSize": 4,
+  "sha256": {
+    "basis_encoder.js": "73097b304f29ca0ba13aa478031ea906f038b3d1bcd3de49c09b920a7ae8bcfa",
+    "basis_encoder.wasm": "4af9dc27d01be4f7509920eca9d9091a55a31c019f0e4121d378963537c76376",
+    "basis_encoder_threads.js": "b9eb83e95cc8c34d33e5a8f41e24f53107790130027a44865a023e26eea5c610",
+    "basis_encoder_threads.wasm": "7cd987023368e5685f189e26df88a386fd0a674c29dfbb1311b4bd07799784dd"
+  }
+}

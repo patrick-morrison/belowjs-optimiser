@@ -18,6 +18,8 @@
   ],
   "scripts": {
     "test": "node test/test-suite.js",
+    "test:browser-unit": "node --test test/encoder-backend.test.mjs",
+    "test:browser-serve": "node test/serve.mjs",
     "test:clean": "rm -rf test/output/*",
     "test:help": "node bin/cli.js --help",
     "release:check": "npm pack --dry-run --json"

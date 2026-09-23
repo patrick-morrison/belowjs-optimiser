@@ -43,6 +43,7 @@ export async function validateTexture(sourceBytes, ktxBytes, container) {
         renderer.readRenderTargetPixels(target, 0, 0, 384, 384, pixels);
         renderer.setRenderTarget(null);
         renderer.render(scene, camera);
+        if (!label) return pixels;
         const figure = document.createElement('figure');
         figure.style.margin = '0';
         const image = document.createElement('img');
@@ -79,7 +80,26 @@ export async function validateTexture(sourceBytes, ktxBytes, container) {
         if (energy === 0 || rmse > 0.12 || alphaRmse > 0.03 || flippedError + 1 < squaredError) {
             throw new Error(`Texture comparison failed: RMSE=${rmse}, flip ratio=${flippedError / squaredError}`);
         }
-        return { rmse, alphaRmse, expectedLevels, decodedLevels: encoded.mipmaps.length, flipErrorRatio: flippedError / Math.max(1, squaredError) };
+        // Inspect full-resolution detail too: a thumbnail alone can hide damaged blocks.
+        const crops = [];
+        for (const texture of [source, encoded]) {
+            texture.minFilter = THREE.LinearFilter;
+            texture.magFilter = THREE.LinearFilter;
+            texture.repeat.set(Math.min(384 / bitmap.width, 1), Math.min(384 / bitmap.height, 1));
+            texture.needsUpdate = true;
+        }
+        for (const [u, v] of [[0, 0], [1, 0], [0.5, 0.5], [0, 1], [1, 1]]) {
+            for (const texture of [source, encoded]) texture.offset.set(u * (1 - texture.repeat.x), v * (1 - texture.repeat.y));
+            const label = u === 0.5 ? '1:1 centre detail' : null;
+            const a = render(source, label && `Source ${label}`);
+            const b = render(encoded, label && `KTX2 ${label}`);
+            let error = 0;
+            for (let i = 0; i < a.length; i++) if (i % 4 !== 3) error += (a[i] - b[i]) ** 2;
+            const cropRmse = Math.sqrt(error / (384 * 384 * 3)) / 255;
+            if (cropRmse > 0.12) throw new Error(`Full-resolution crop failed: ${u},${v} RMSE=${cropRmse}`);
+            crops.push({ u, v, rmse: cropRmse });
+        }
+        return { rmse, alphaRmse, crops, expectedLevels, decodedLevels: encoded.mipmaps.length, flipErrorRatio: flippedError / Math.max(1, squaredError) };
     } finally {
         source.dispose();
         encoded.dispose();

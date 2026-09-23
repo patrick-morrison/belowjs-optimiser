@@ -1,5 +1,8 @@
 # Browser KTX2 Validation
 
+Historical 1.50 release checks are below. The newer Basis 2.5 results and revised
+full-resolution default are in [the upgrade report](../docs/BASIS_BROWSER_UPGRADE.md).
+
 ## Reproduce
 
 From the repository root:
@@ -60,10 +63,14 @@ the real submarine fixture passed pack, inspect, unpack, and repack again:
 1,000,000 polygons and one texture. The installed dependency audit reported
 zero known vulnerabilities. CLI help and package dry-run checks passed.
 
-## Newer Encoder Comparison
+## Basis 2.5 Upgrade
 
-The shipped WASM is the previously rebuilt Basis Universal 1.50 encoder with a
-4GB growing heap. Upstream is now at 2.5:
+The original tests above used the rebuilt Basis Universal 1.50 encoder with a
+4 GiB growing heap. The subsequent Basis 2.5 audit, reproducible build, A/B results,
+threading policy and release gates are recorded in
+[BASIS_BROWSER_UPGRADE.md](../docs/BASIS_BROWSER_UPGRADE.md).
+
+Reference material used for that comparison:
 
 - [Basis release notes](https://github.com/BinomialLLC/basis_universal/wiki/Release-Notes):
   browser threading and WASM64 support; July 2026 ASTC/XUASTC memory and speed
@@ -74,10 +81,6 @@ The shipped WASM is the previously rebuilt Basis Universal 1.50 encoder with a
 - [Emscripten threading requirements](https://emscripten.org/docs/porting/pthreads.html):
   shared-memory threading needs COOP/COEP and SharedArrayBuffer.
 
-Next controlled comparison: rebuild 2.5 with standard ETC1S/UASTC output, run
-these same 4K/8K inputs at matched quality, record wall time and peak process
-memory, then test a separate threaded build and WASM64 capability fallback.
-Keep mip levels, dimensions, exported GLB loading, alpha/orientation checks,
-and viewer compatibility as release gates. WASM64 raises capacity but does
-not itself reduce memory consumption. No newer-encoder speedup is claimed
-by this release.
+The comparison retains standard ETC1S/UASTC output, mipmaps, source dimensions,
+and matched quality/effort. Measured WASM heap capacity is not total process peak
+memory. WASM64 raises capacity but does not itself reduce memory consumption.
